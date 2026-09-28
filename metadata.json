@@ -1,0 +1,6 @@
+{
+  "name": "CiberAventura: El Misterio del Chip Mágico",
+  "description": "Videojuego educativo de plataformas y desafíos para 2do Grado sobre el interior de la computadora, la CPU y el almacenamiento.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
