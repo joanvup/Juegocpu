@@ -7,7 +7,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { GameProgress, LevelData, WorldId, CharacterId } from './types/game';
 import { WORLDS_DATA } from './data/levelsData';
 import { BADGES } from './data/curriculumData';
-import { loadGameProgress, saveGameProgress, markLevelComplete } from './services/storage';
+import { loadGameProgress, saveGameProgress, markLevelComplete, resetGameProgress } from './services/storage';
 import { soundService } from './services/audio';
 
 import { GameHeader } from './components/Header/GameHeader';
@@ -229,6 +229,17 @@ export default function App() {
     else if (gameType === 'devices') setCurrentView('mini_game_devices');
   };
 
+  const handleResetProgress = () => {
+    const fresh = resetGameProgress();
+    setProgress(fresh);
+    setSelectedLevel(null);
+    setShowLevelIntro(false);
+    setLevelVictoryData(null);
+    setCurrentView('map');
+    soundService.playSuccess();
+    soundService.speak('¡Nueva partida iniciada para un nuevo estudiante!');
+  };
+
   // Calculate total user score across levels
   const totalScore = Object.values(progress.completedLevels).reduce((acc, l) => acc + l.score, 0);
 
@@ -243,6 +254,7 @@ export default function App() {
         onOpenMiniGames={() => setIsMiniGamesHubOpen(true)}
         onToggleSound={handleToggleSound}
         onToggleNarration={handleToggleNarration}
+        onResetProgress={handleResetProgress}
       />
 
       {/* Main Screen Router */}

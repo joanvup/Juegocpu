@@ -1,12 +1,12 @@
 import { GameProgress, WorldId } from '../types/game';
 
-const STORAGE_KEY = 'ciber_aventura_save_v1';
+const SESSION_KEY = 'ciber_aventura_session_active';
 
 export const DEFAULT_PROGRESS: GameProgress = {
   selectedCharacter: 'byte',
   characterHat: 'ninguno',
-  unlockedWorlds: ['entrada', 'cpu'],
-  unlockedLevels: ['w1_l1'],
+  unlockedWorlds: ['entrada'], // Empezar solo con Mundo 1 desbloqueado
+  unlockedLevels: ['w1_l1'], // Empezar solo con Nivel 1-1
   completedLevels: {},
   totalBits: 0,
   unlockedBadges: [],
@@ -17,32 +17,37 @@ export const DEFAULT_PROGRESS: GameProgress = {
   narrationEnabled: true,
 };
 
+// Al recargar el juego, el progreso siempre se reinicia para que el siguiente estudiante empiece de cero
 export const loadGameProgress = (): GameProgress => {
   if (typeof window === 'undefined') return DEFAULT_PROGRESS;
   try {
-    const saved = localStorage.getItem(STORAGE_KEY);
-    if (saved) {
-      const parsed = JSON.parse(saved);
-      return {
-        ...DEFAULT_PROGRESS,
-        ...parsed,
-        unlockedWorlds: Array.from(new Set([...DEFAULT_PROGRESS.unlockedWorlds, ...(parsed.unlockedWorlds || [])])),
-        unlockedLevels: Array.from(new Set([...DEFAULT_PROGRESS.unlockedLevels, ...(parsed.unlockedLevels || [])])),
-      };
-    }
+    // Limpiar cualquier residuo de sesiones o localStorages anteriores
+    localStorage.removeItem('ciber_aventura_save_v1');
+    sessionStorage.removeItem(SESSION_KEY);
   } catch (e) {
-    console.error('Failed to load progress', e);
+    console.error('Error limpiando progreso anterior', e);
   }
-  return DEFAULT_PROGRESS;
+  return { ...DEFAULT_PROGRESS };
 };
 
 export const saveGameProgress = (progress: GameProgress) => {
   if (typeof window === 'undefined') return;
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(progress));
+    // Guardamos únicamente en memoria de sesión temporal durante la partida activa del estudiante
+    sessionStorage.setItem(SESSION_KEY, JSON.stringify(progress));
   } catch (e) {
-    console.error('Failed to save progress', e);
+    console.error('Error guardando progreso de sesión', e);
   }
+};
+
+export const resetGameProgress = (): GameProgress => {
+  if (typeof window !== 'undefined') {
+    try {
+      localStorage.removeItem('ciber_aventura_save_v1');
+      sessionStorage.removeItem(SESSION_KEY);
+    } catch {}
+  }
+  return { ...DEFAULT_PROGRESS };
 };
 
 export const markLevelComplete = (
@@ -56,7 +61,7 @@ export const markLevelComplete = (
   newBadgeId?: string
 ): GameProgress => {
   const currentLevelRecord = current.completedLevels[levelId] || { stars: 0, score: 0, highBits: 0 };
-  
+
   const updatedCompleted = {
     ...current.completedLevels,
     [levelId]: {
