@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { GameProgress, LevelData, WorldId, CharacterId } from './types/game';
 import { WORLDS_DATA } from './data/levelsData';
 import { BADGES } from './data/curriculumData';
@@ -18,17 +18,19 @@ import { LevelCompleteModal } from './components/EducationalModal/LevelCompleteM
 import { EncyclopediaModal } from './components/Encyclopedia/EncyclopediaModal';
 import { CertificateModal } from './components/Certificate/CertificateModal';
 import { CharacterModal } from './components/CharacterCustomizer/CharacterModal';
-import { MiniGamesHubModal } from './components/MiniGames/MiniGamesHubModal';
+import { MiniGamesHubModal, MiniGameType } from './components/MiniGames/MiniGamesHubModal';
 
 import { CpuKitchenGame } from './components/MiniGames/CpuKitchenGame';
 import { StorageOrganizerGame } from './components/MiniGames/StorageOrganizerGame';
 import { CloudCableGame } from './components/MiniGames/CloudCableGame';
 import { PaintDinoGame } from './components/MiniGames/PaintDinoGame';
 import { CycleRunnerGame } from './components/MiniGames/CycleRunnerGame';
+import { FastMathCpuGame } from './components/MiniGames/FastMathCpuGame';
+import { DeviceSorterGame } from './components/MiniGames/DeviceSorterGame';
 
 export default function App() {
   const [progress, setProgress] = useState<GameProgress>(() => loadGameProgress());
-  
+
   // Game View State
   const [currentView, setCurrentView] = useState<
     | 'map'
@@ -38,6 +40,8 @@ export default function App() {
     | 'mini_game_cloud'
     | 'mini_game_dino'
     | 'mini_game_cycle'
+    | 'mini_game_math'
+    | 'mini_game_devices'
   >('map');
 
   // Active level selection
@@ -72,62 +76,66 @@ export default function App() {
   // Start playing the level
   const handleStartLevel = () => {
     setShowLevelIntro(false);
+    setLevelVictoryData(null);
     setCurrentView('platform_game');
   };
 
   // When a level is completed
-  const handleLevelCompleted = (stars: number, score: number, bitsCollected: number) => {
-    if (!selectedLevel) return;
+  const handleLevelCompleted = useCallback(
+    (stars: number, score: number, bitsCollected: number) => {
+      if (!selectedLevel) return;
 
-    // Find next level & world unlocking logic
-    let nextLevelId: string | undefined;
-    let nextWorldId: WorldId | undefined;
-    let newBadgeId: string | undefined;
+      // Find next level & world unlocking logic
+      let nextLevelId: string | undefined;
+      let nextWorldId: WorldId | undefined;
+      let newBadgeId: string | undefined;
 
-    // Find current world
-    const currentWorld = WORLDS_DATA.find((w) => w.id === selectedLevel.worldId);
-    if (currentWorld) {
-      const levelIdx = currentWorld.levels.findIndex((l) => l.id === selectedLevel.id);
-      if (levelIdx !== -1 && levelIdx < currentWorld.levels.length - 1) {
-        nextLevelId = currentWorld.levels[levelIdx + 1].id;
-      } else if (levelIdx === currentWorld.levels.length - 1) {
-        // Completed the entire world! Unlock next world badge and next world
-        const worldIdx = WORLDS_DATA.findIndex((w) => w.id === currentWorld.id);
-        const matchingBadge = BADGES.find((b) => b.world === currentWorld.id);
-        if (matchingBadge) {
-          newBadgeId = matchingBadge.id;
-        }
+      const currentWorld = WORLDS_DATA.find((w) => w.id === selectedLevel.worldId);
+      if (currentWorld) {
+        const levelIdx = currentWorld.levels.findIndex((l) => l.id === selectedLevel.id);
+        if (levelIdx !== -1 && levelIdx < currentWorld.levels.length - 1) {
+          nextLevelId = currentWorld.levels[levelIdx + 1].id;
+        } else if (levelIdx === currentWorld.levels.length - 1) {
+          // Completed the entire world! Unlock next world badge and next world
+          const worldIdx = WORLDS_DATA.findIndex((w) => w.id === currentWorld.id);
+          const matchingBadge = BADGES.find((b) => b.world === currentWorld.id);
+          if (matchingBadge) {
+            newBadgeId = matchingBadge.id;
+          }
 
-        if (worldIdx !== -1 && worldIdx < WORLDS_DATA.length - 1) {
-          nextWorldId = WORLDS_DATA[worldIdx + 1].id;
-          nextLevelId = WORLDS_DATA[worldIdx + 1].levels[0]?.id;
+          if (worldIdx !== -1 && worldIdx < WORLDS_DATA.length - 1) {
+            nextWorldId = WORLDS_DATA[worldIdx + 1].id;
+            nextLevelId = WORLDS_DATA[worldIdx + 1].levels[0]?.id;
+          }
         }
       }
-    }
 
-    const updated = markLevelComplete(
-      progress,
-      selectedLevel.id,
-      stars,
-      score,
-      bitsCollected,
-      nextLevelId,
-      nextWorldId,
-      newBadgeId
-    );
+      setProgress((prev) => {
+        const updated = markLevelComplete(
+          prev,
+          selectedLevel.id,
+          stars,
+          score,
+          bitsCollected,
+          nextLevelId,
+          nextWorldId,
+          newBadgeId
+        );
+        return updated;
+      });
 
-    setProgress(updated);
+      const badgeName = newBadgeId ? BADGES.find((b) => b.id === newBadgeId)?.name : null;
 
-    const badgeName = newBadgeId ? BADGES.find((b) => b.id === newBadgeId)?.name : null;
-
-    setLevelVictoryData({
-      level: selectedLevel,
-      stars,
-      bitsCollected,
-      score,
-      newBadgeUnlocked: badgeName,
-    });
-  };
+      setLevelVictoryData({
+        level: selectedLevel,
+        stars,
+        bitsCollected,
+        score,
+        newBadgeUnlocked: badgeName,
+      });
+    },
+    [selectedLevel]
+  );
 
   // Replay current level
   const handleReplayLevel = () => {
@@ -140,7 +148,6 @@ export default function App() {
     if (!selectedLevel) return;
     setLevelVictoryData(null);
 
-    // Find next level
     let foundNext: LevelData | null = null;
     for (let w = 0; w < WORLDS_DATA.length; w++) {
       const world = WORLDS_DATA[w];
@@ -211,13 +218,15 @@ export default function App() {
     saveGameProgress(updated);
   };
 
-  const handleOpenMiniGame = (gameType: 'kitchen' | 'storage' | 'cloud' | 'dino' | 'cycle') => {
+  const handleOpenMiniGame = (gameType: MiniGameType) => {
     setIsMiniGamesHubOpen(false);
     if (gameType === 'kitchen') setCurrentView('mini_game_kitchen');
     else if (gameType === 'storage') setCurrentView('mini_game_storage');
     else if (gameType === 'cloud') setCurrentView('mini_game_cloud');
     else if (gameType === 'dino') setCurrentView('mini_game_dino');
     else if (gameType === 'cycle') setCurrentView('mini_game_cycle');
+    else if (gameType === 'math') setCurrentView('mini_game_math');
+    else if (gameType === 'devices') setCurrentView('mini_game_devices');
   };
 
   // Calculate total user score across levels
@@ -254,7 +263,10 @@ export default function App() {
             characterId={progress.selectedCharacter}
             characterHat={progress.characterHat}
             onLevelComplete={handleLevelCompleted}
-            onExitToMap={() => setCurrentView('map')}
+            onExitToMap={() => {
+              setLevelVictoryData(null);
+              setCurrentView('map');
+            }}
           />
         )}
 
@@ -297,6 +309,24 @@ export default function App() {
         {currentView === 'mini_game_cycle' && (
           <div className="p-4 md:p-6 flex-1 flex items-center justify-center">
             <CycleRunnerGame
+              onBack={() => setCurrentView('map')}
+              onComplete={handleMiniGameReward}
+            />
+          </div>
+        )}
+
+        {currentView === 'mini_game_math' && (
+          <div className="p-4 md:p-6 flex-1 flex items-center justify-center">
+            <FastMathCpuGame
+              onBack={() => setCurrentView('map')}
+              onComplete={handleMiniGameReward}
+            />
+          </div>
+        )}
+
+        {currentView === 'mini_game_devices' && (
+          <div className="p-4 md:p-6 flex-1 flex items-center justify-center">
+            <DeviceSorterGame
               onBack={() => setCurrentView('map')}
               onComplete={handleMiniGameReward}
             />

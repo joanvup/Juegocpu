@@ -3,7 +3,7 @@ import { CharacterId, LevelCollectible, LevelData, InteractiveDoor, Platform } f
 import { soundService } from '../../services/audio';
 import { QuizPortalModal } from '../EducationalModal/QuizPortalModal';
 import { TouchControls } from './TouchControls';
-import { ArrowLeft, Sparkles, Volume2 } from 'lucide-react';
+import { ArrowLeft, Sparkles, Volume2, Lock, CheckCircle2, AlertCircle } from 'lucide-react';
 
 interface GameCanvasProps {
   level: LevelData;
@@ -47,16 +47,23 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
 }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
-  // Active modal door state
+  // Active quiz dialog state (when interacting with a door)
   const [activeDoor, setActiveDoor] = useState<InteractiveDoor | null>(null);
 
-  // In-level collectibles and doors tracking
-  const [collectibles, setCollectibles] = useState<LevelCollectible[]>(() => [...level.collectibles]);
-  const [doors, setDoors] = useState<InteractiveDoor[]>(() => [...level.doors]);
-  const [bitsCollected, setBitsCollected] = useState(0);
-  const [score, setScore] = useState(0);
+  // HUD stats for React display
+  const [hudBits, setHudBits] = useState(0);
+  const [hudScore, setHudScore] = useState(0);
+  const [unlockedCount, setUnlockedCount] = useState(0);
+  const [goalWarning, setGoalWarning] = useState<string | null>(null);
 
-  // Platform dynamic instances
+  // Engine refs to avoid tearing down requestAnimationFrame on state updates
+  const collectiblesRef = useRef<LevelCollectible[]>([...level.collectibles]);
+  const doorsRef = useRef<InteractiveDoor[]>(
+    level.doors.map((d) => ({
+      ...d,
+      isUnlocked: false,
+    }))
+  );
   const platformsRef = useRef<Platform[]>(
     level.platforms.map((p) => ({
       ...p,
@@ -66,7 +73,15 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
     }))
   );
 
-  // Controls state
+  const bitsCollectedRef = useRef(0);
+  const scoreRef = useRef(0);
+  const isCompletedRef = useRef(false);
+  const animFrameIdRef = useRef<number | null>(null);
+  const particlesRef = useRef<Particle[]>([]);
+  const cameraXRef = useRef(0);
+  const victoryCelebrationTickRef = useRef(0);
+
+  // Inputs
   const inputRef = useRef({
     left: false,
     right: false,
@@ -74,7 +89,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
     jumpPressed: false,
   });
 
-  // Player physics state
+  // Player physics
   const playerRef = useRef<PlayerState>({
     x: level.playerStartX,
     y: level.playerStartY,
@@ -85,29 +100,58 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
     isGrounded: false,
     facing: 'right',
     jumpCount: 0,
-    maxJumps: 2, // Allow double jump for 2nd graders to make platforming super fun and forgiving!
+    maxJumps: 2,
   });
 
-  const particlesRef = useRef<Particle[]>([]);
-  const cameraXRef = useRef(0);
-  const animFrameIdRef = useRef<number | null>(null);
-  const isCompletedRef = useRef(false);
+  // Reset or initialize on level change
+  useEffect(() => {
+    isCompletedRef.current = false;
+    victoryCelebrationTickRef.current = 0;
+    bitsCollectedRef.current = 0;
+    scoreRef.current = 0;
+    setHudBits(0);
+    setHudScore(0);
+    setUnlockedCount(0);
+    setGoalWarning(null);
 
-  // Spawn collectible sparkle particles
-  const spawnCollectParticles = useCallback((x: number, y: number, color: string) => {
-    for (let i = 0; i < 14; i++) {
-      const angle = (Math.PI * 2 * i) / 14 + Math.random() * 0.2;
+    collectiblesRef.current = [...level.collectibles];
+    doorsRef.current = level.doors.map((d) => ({ ...d, isUnlocked: false }));
+    platformsRef.current = level.platforms.map((p) => ({
+      ...p,
+      initialX: p.initialX ?? p.x,
+      dx: p.dx ?? 0,
+      moveRange: p.moveRange ?? 100,
+    }));
+
+    playerRef.current = {
+      x: level.playerStartX,
+      y: level.playerStartY,
+      vx: 0,
+      vy: 0,
+      width: 42,
+      height: 46,
+      isGrounded: false,
+      facing: 'right',
+      jumpCount: 0,
+      maxJumps: 2,
+    };
+  }, [level.id]);
+
+  // Spawn collectible particle burst
+  const spawnParticles = useCallback((x: number, y: number, color: string, count = 12) => {
+    for (let i = 0; i < count; i++) {
+      const angle = (Math.PI * 2 * i) / count + Math.random() * 0.2;
       const speed = Math.random() * 3 + 2;
       particlesRef.current.push({
         x,
         y,
         vx: Math.cos(angle) * speed,
         vy: Math.sin(angle) * speed,
-        radius: Math.random() * 3 + 2,
+        radius: Math.random() * 3 + 1.5,
         color,
         alpha: 1,
         life: 0,
-        maxLife: 25,
+        maxLife: 24,
       });
     }
   }, []);
@@ -115,7 +159,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
   // Keyboard controls listener
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (activeDoor) return; // Freeze during quiz
+      if (activeDoor) return;
 
       if (e.code === 'ArrowLeft' || e.code === 'KeyA') {
         inputRef.current.left = true;
@@ -149,16 +193,26 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
     };
   }, [activeDoor]);
 
-  // Handle door unlocked after answering quiz correctly
+  // Unlocking door callback
   const handleDoorSuccess = (doorId: string) => {
-    setDoors((prev) =>
-      prev.map((d) => (d.id === doorId ? { ...d, isUnlocked: true } : d))
+    doorsRef.current = doorsRef.current.map((d) =>
+      d.id === doorId ? { ...d, isUnlocked: true } : d
     );
-    setScore((s) => s + 100);
+    const count = doorsRef.current.filter((d) => d.isUnlocked).length;
+    setUnlockedCount(count);
+    scoreRef.current += 150;
+    setHudScore(scoreRef.current);
     setActiveDoor(null);
+    soundService.playSuccess();
+
+    // Check if all doors unlocked now
+    const allUnlocked = doorsRef.current.every((d) => d.isUnlocked);
+    if (allUnlocked) {
+      soundService.speak('¡Excelente! Todas las preguntas fueron resueltas. ¡El portal de la meta se ha activado!');
+    }
   };
 
-  // Main game update & render loop
+  // Main 60fps Loop
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -166,21 +220,35 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
     if (!ctx) return;
 
     let tick = 0;
+    let warningTimer = 0;
 
     const loop = () => {
       tick++;
 
-      // Canvas dimensions
       const viewWidth = canvas.width;
       const viewHeight = canvas.height;
 
-      // UPDATE PHYSICS ONLY IF NOT IN DIALOGUE
+      // Handle goal warning banner auto-dismiss
+      if (warningTimer > 0) {
+        warningTimer--;
+        if (warningTimer === 0) {
+          setGoalWarning(null);
+        }
+      }
+
+      // Check if level completed victory sequence is playing
+      if (isCompletedRef.current) {
+        victoryCelebrationTickRef.current++;
+        // Keep particles moving and render celebration
+      }
+
+      // UPDATE GAME PHYSICS (Only when activeDoor modal is NOT open, and before victory completes)
       if (!activeDoor && !isCompletedRef.current) {
         const player = playerRef.current;
         const input = inputRef.current;
 
         // Horizontal movement
-        const ACCEL = 0.8;
+        const ACCEL = 0.85;
         const MAX_SPEED = 5.8;
         const FRICTION = 0.82;
 
@@ -209,8 +277,9 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
             } else {
               soundService.playSpring();
             }
-            // Spawn jump dust
-            for (let i = 0; i < 6; i++) {
+
+            // Jump particles
+            for (let i = 0; i < 5; i++) {
               particlesRef.current.push({
                 x: player.x + player.width / 2,
                 y: player.y + player.height,
@@ -224,14 +293,14 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
               });
             }
           }
-          input.jump = false; // consume jump press
+          input.jump = false;
         }
 
         // Apply Gravity
         player.vy += GRAVITY;
         if (player.vy > 14) player.vy = 14;
 
-        // Apply moving platforms logic
+        // Apply moving platform motion
         platformsRef.current.forEach((plat) => {
           if (plat.type === 'moving' && plat.dx && plat.moveRange && plat.initialX !== undefined) {
             plat.x += plat.dx;
@@ -243,11 +312,38 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
           }
         });
 
-        // Projected next position
-        const nextX = player.x + player.vx;
+        // 1. Mandatory Locked Doors Collision (FULL-HEIGHT IMPENETRABLE BARRIER FIELD)
+        // If a door is locked, it blocks horizontal crossing anywhere on the Y axis!
+        let nextX = player.x + player.vx;
+        doorsRef.current.forEach((door) => {
+          if (!door.isUnlocked) {
+            const barrierLeft = door.x - 12;
+            const barrierRight = door.x + door.width + 12;
+
+            // Check if player would intersect the barrier's X coordinates
+            const playerLeft = nextX;
+            const playerRight = nextX + player.width;
+
+            if (playerRight >= barrierLeft && playerLeft <= barrierRight) {
+              // Stop player at barrier edge
+              if (player.x + player.width <= barrierLeft) {
+                nextX = barrierLeft - player.width;
+              } else if (player.x >= barrierRight) {
+                nextX = barrierRight;
+              } else {
+                nextX = player.x;
+              }
+              player.vx = 0;
+
+              // Open dialog automatically so they answer
+              setActiveDoor(door);
+            }
+          }
+        });
+
         const nextY = player.y + player.vy;
 
-        // Check horizontal level boundaries
+        // Check horizontal boundaries
         player.x = Math.max(0, Math.min(level.canvasWidth - player.width, nextX));
 
         // Check platform collisions
@@ -255,22 +351,20 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
         const currentPlatforms = platformsRef.current;
 
         for (const plat of currentPlatforms) {
-          // Check landing on top of platform
           if (
             player.x + player.width > plat.x &&
             player.x < plat.x + plat.width &&
-            player.y + player.height <= plat.y + 12 &&
+            player.y + player.height <= plat.y + 14 &&
             nextY + player.height >= plat.y &&
             player.vy >= 0
           ) {
-            // Check special platform types
             if (plat.type === 'spring') {
-              player.vy = -16.5; // Super spring bounce!
+              player.vy = -16.5;
               player.jumpCount = 1;
               soundService.playSpring();
-              spawnCollectParticles(plat.x + plat.width / 2, plat.y, '#f59e0b');
+              spawnParticles(plat.x + plat.width / 2, plat.y, '#f59e0b', 10);
             } else if (plat.type === 'fan') {
-              player.vy = -13; // Wind draft
+              player.vy = -13;
               soundService.playFanSound();
             } else {
               player.y = plat.y - player.height;
@@ -278,7 +372,6 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
               grounded = true;
               player.jumpCount = 0;
 
-              // If on a moving platform, carry the player
               if (plat.type === 'moving' && plat.dx) {
                 player.x += plat.dx;
               }
@@ -293,7 +386,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
           player.isGrounded = true;
         }
 
-        // Check wind draft above fan platforms
+        // Fan wind draft
         currentPlatforms.forEach((plat) => {
           if (plat.type === 'fan') {
             if (
@@ -302,87 +395,95 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
               player.y < plat.y &&
               player.y > plat.y - 180
             ) {
-              player.vy -= 0.8; // Lift player upwards
+              player.vy -= 0.8;
             }
           }
         });
 
-        // Pit fall check (gentle respawn for 2nd graders)
+        // Pit fall check (gentle respawn)
         if (player.y > level.canvasHeight + 60) {
-          player.x = Math.max(20, player.x - 220);
+          player.x = Math.max(30, player.x - 220);
           player.y = 350;
           player.vy = 0;
           player.vx = 0;
           soundService.playWrong();
         }
 
-        // Check Collectibles collision
-        setCollectibles((prev) => {
-          const remaining: LevelCollectible[] = [];
-          for (const item of prev) {
-            const itemCenterX = item.x + 15;
-            const itemCenterY = item.y + 15;
-            const dist = Math.hypot(
-              player.x + player.width / 2 - itemCenterX,
-              player.y + player.height / 2 - itemCenterY
+        // Check collectibles
+        const remainingCollectibles: LevelCollectible[] = [];
+        for (const item of collectiblesRef.current) {
+          const itemCenterX = item.x + 15;
+          const itemCenterY = item.y + 15;
+          const dist = Math.hypot(
+            player.x + player.width / 2 - itemCenterX,
+            player.y + player.height / 2 - itemCenterY
+          );
+
+          if (dist < 34) {
+            soundService.playBitCollect();
+            bitsCollectedRef.current += 1;
+            setHudBits(bitsCollectedRef.current);
+
+            const points = item.type === 'crystal' ? 50 : item.type === 'star' ? 30 : 15;
+            scoreRef.current += points;
+            setHudScore(scoreRef.current);
+
+            spawnParticles(
+              itemCenterX,
+              itemCenterY,
+              item.type === 'crystal' ? '#a855f7' : item.type === 'star' ? '#fbbf24' : '#38bdf8',
+              14
             );
-
-            if (dist < 32) {
-              soundService.playBitCollect();
-              setBitsCollected((b) => b + 1);
-              setScore((s) => s + (item.type === 'crystal' ? 50 : item.type === 'star' ? 30 : 15));
-              spawnCollectParticles(
-                itemCenterX,
-                itemCenterY,
-                item.type === 'crystal' ? '#a855f7' : item.type === 'star' ? '#fbbf24' : '#38bdf8'
-              );
-            } else {
-              remaining.push(item);
-            }
+          } else {
+            remainingCollectibles.push(item);
           }
-          return remaining;
-        });
+        }
+        collectiblesRef.current = remainingCollectibles;
 
-        // Check Interactive Doors collision
-        doors.forEach((door) => {
-          if (!door.isUnlocked) {
-            // Check if player reaches the door
-            if (
-              player.x + player.width > door.x - 10 &&
-              player.x < door.x + door.width + 10 &&
-              player.y + player.height > door.y &&
-              player.y < door.y + door.height
-            ) {
-              // Block player from passing until unlocked & open quiz dialog
-              if (player.x < door.x) {
-                player.x = door.x - player.width;
-              } else {
-                player.x = door.x + door.width;
-              }
-              player.vx = 0;
-              setActiveDoor(door);
-            }
-          }
-        });
-
-        // Check Goal Reached (Portal at end of level)
+        // 2. CHECK GOAL REACHED
         const goal = level.goal;
-        if (
+        const isNearGoal =
           player.x + player.width > goal.x &&
           player.x < goal.x + goal.width &&
           player.y + player.height > goal.y &&
-          player.y < goal.y + goal.height
-        ) {
-          if (!isCompletedRef.current) {
+          player.y < goal.y + goal.height;
+
+        if (isNearGoal) {
+          // Check if all educational doors are completed!
+          const allUnlocked = doorsRef.current.every((d) => d.isUnlocked);
+
+          if (!allUnlocked) {
+            // Push player back and show clear message
+            player.x = goal.x - player.width - 15;
+            player.vx = -3;
+            soundService.playWrong();
+            setGoalWarning('⚠️ ¡Portal Bloqueado! Debes responder la pregunta del Guardián en la puerta para activarlo.');
+            warningTimer = 180;
+            soundService.speak('¡La meta está bloqueada! Debes responder la pregunta del guardián para activarla.');
+          } else if (!isCompletedRef.current) {
+            // ALL DOORS UNLOCKED! Trigger victory cleanly without freezing!
             isCompletedRef.current = true;
+            soundService.playSuccess();
+
+            // Spawn victory fireworks
+            spawnParticles(goal.x + goal.width / 2, goal.y + goal.height / 2, '#fde047', 40);
+            spawnParticles(goal.x + goal.width / 2, goal.y + goal.height / 2, '#38bdf8', 40);
+
+            // Compute score and stars safely
             const totalBits = level.collectibles.length;
-            const percentage = totalBits > 0 ? (bitsCollected / totalBits) * 100 : 100;
+            const collectedBits = bitsCollectedRef.current;
+            const percentage = totalBits > 0 ? (collectedBits / totalBits) * 100 : 100;
             const finalStars = percentage >= 80 ? 3 : percentage >= 45 ? 2 : 1;
-            onLevelComplete(finalStars, score + 200, bitsCollected);
+            const finalScore = scoreRef.current + 250;
+
+            // Wait 500ms for victory visual transition, then call callback
+            setTimeout(() => {
+              onLevelComplete(finalStars, finalScore, collectedBits);
+            }, 600);
           }
         }
 
-        // Smooth Camera Follow
+        // Camera follow
         const targetCamX = player.x - viewWidth / 2 + player.width / 2;
         const maxCamX = Math.max(0, level.canvasWidth - viewWidth);
         const clampedCamX = Math.max(0, Math.min(maxCamX, targetCamX));
@@ -394,9 +495,8 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
 
       const camX = cameraXRef.current;
 
-      // 1. Cyber Background Parallax
+      // Background Gradient
       ctx.save();
-      // Gradient background
       const bgGrad = ctx.createLinearGradient(0, 0, 0, viewHeight);
       if (level.worldId === 'entrada') {
         bgGrad.addColorStop(0, '#06201b');
@@ -414,7 +514,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
       ctx.fillStyle = bgGrad;
       ctx.fillRect(0, 0, viewWidth, viewHeight);
 
-      // Grid circuits in background
+      // Grid circuits
       ctx.strokeStyle = 'rgba(56, 189, 248, 0.08)';
       ctx.lineWidth = 2;
       const gridSize = 60;
@@ -431,25 +531,15 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
         ctx.lineTo(viewWidth, y);
         ctx.stroke();
       }
-
-      // Floating ambient binary chips in background
-      for (let i = 0; i < 15; i++) {
-        const bx = ((i * 180 - camX * 0.2 + tick * 0.4) % (level.canvasWidth + 200)) - camX * 0.2;
-        const by = 80 + (Math.sin(tick * 0.03 + i) * 30) + ((i * 35) % 250);
-        ctx.fillStyle = 'rgba(125, 211, 252, 0.15)';
-        ctx.font = 'bold 14px monospace';
-        ctx.fillText(i % 2 === 0 ? '1' : '0', bx % viewWidth, by);
-      }
       ctx.restore();
 
-      // Apply Camera Transform for World Objects
+      // Camera Transform for World Objects
       ctx.save();
       ctx.translate(-camX, 0);
 
-      // 2. Render Platforms
+      // 1. Render Platforms
       platformsRef.current.forEach((plat) => {
         if (plat.type === 'ground') {
-          // Ground platform with mother-board green / tech lines
           const gGrad = ctx.createLinearGradient(plat.x, plat.y, plat.x, plat.y + plat.height);
           gGrad.addColorStop(0, '#10b981');
           gGrad.addColorStop(0.15, '#047857');
@@ -459,7 +549,6 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
           ctx.roundRect(plat.x, plat.y, plat.width, plat.height, [8, 8, 0, 0]);
           ctx.fill();
 
-          // Golden circuit trace on top
           ctx.strokeStyle = '#fde047';
           ctx.lineWidth = 3;
           ctx.beginPath();
@@ -467,7 +556,6 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
           ctx.lineTo(plat.x + plat.width - 8, plat.y + 4);
           ctx.stroke();
         } else if (plat.type === 'circuit') {
-          // Floating circuit platform
           ctx.fillStyle = '#1e1b4b';
           ctx.strokeStyle = '#818cf8';
           ctx.lineWidth = 3;
@@ -476,14 +564,12 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
           ctx.fill();
           ctx.stroke();
 
-          // Glowing node points
           ctx.fillStyle = '#38bdf8';
           ctx.beginPath();
           ctx.arc(plat.x + 14, plat.y + plat.height / 2, 4, 0, Math.PI * 2);
           ctx.arc(plat.x + plat.width - 14, plat.y + plat.height / 2, 4, 0, Math.PI * 2);
           ctx.fill();
         } else if (plat.type === 'moving') {
-          // Moving platform with yellow hazard stripes
           ctx.fillStyle = '#0f172a';
           ctx.strokeStyle = '#eab308';
           ctx.lineWidth = 3;
@@ -492,13 +578,11 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
           ctx.fill();
           ctx.stroke();
 
-          // Arrow indicator
           ctx.fillStyle = '#facc15';
           ctx.font = 'bold 12px sans-serif';
           ctx.textAlign = 'center';
           ctx.fillText('◄ ══ ►', plat.x + plat.width / 2, plat.y + 17);
         } else if (plat.type === 'spring') {
-          // Springboard platform
           ctx.fillStyle = '#ea580c';
           ctx.strokeStyle = '#fde047';
           ctx.lineWidth = 3;
@@ -507,13 +591,11 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
           ctx.fill();
           ctx.stroke();
 
-          // Spring coil icon
           ctx.fillStyle = '#fef08a';
           ctx.font = 'bold 14px sans-serif';
           ctx.textAlign = 'center';
           ctx.fillText('⚡ RESORTE ⚡', plat.x + plat.width / 2, plat.y + 17);
         } else if (plat.type === 'fan') {
-          // Fan Platform ("Fuuuuuu" wind blower)
           ctx.fillStyle = '#0284c7';
           ctx.strokeStyle = '#38bdf8';
           ctx.lineWidth = 3;
@@ -527,7 +609,6 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
           ctx.textAlign = 'center';
           ctx.fillText('💨 FUUUU!', plat.x + plat.width / 2, plat.y + 16);
 
-          // Render rising wind draft particles
           for (let w = 0; w < 3; w++) {
             const windY = plat.y - ((tick * 4 + w * 50) % 150);
             const windAlpha = Math.max(0, 1 - (plat.y - windY) / 150);
@@ -539,7 +620,6 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
             ctx.stroke();
           }
         } else if (plat.type === 'usb') {
-          // USB platform
           ctx.fillStyle = '#334155';
           ctx.strokeStyle = '#94a3b8';
           ctx.lineWidth = 3;
@@ -548,14 +628,9 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
           ctx.fill();
           ctx.stroke();
 
-          // USB connector tip
           ctx.fillStyle = '#cbd5e1';
           ctx.fillRect(plat.x + plat.width - 20, plat.y + 4, 16, plat.height - 8);
-          ctx.fillStyle = '#0f172a';
-          ctx.fillRect(plat.x + plat.width - 14, plat.y + 7, 4, 4);
-          ctx.fillRect(plat.x + plat.width - 14, plat.y + plat.height - 11, 4, 4);
         } else if (plat.type === 'cloud') {
-          // Cloud / Submarine cable platform
           ctx.fillStyle = '#1e293b';
           ctx.strokeStyle = '#38bdf8';
           ctx.lineWidth = 3;
@@ -564,7 +639,6 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
           ctx.fill();
           ctx.stroke();
 
-          // Submarine cable glow
           ctx.fillStyle = '#38bdf8';
           ctx.font = 'bold 12px sans-serif';
           ctx.textAlign = 'center';
@@ -572,14 +646,13 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
         }
       });
 
-      // 3. Render Collectibles
-      collectibles.forEach((item) => {
+      // 2. Render Collectibles
+      collectiblesRef.current.forEach((item) => {
         const bob = Math.sin(tick * 0.08 + item.x) * 6;
         const cy = item.y + bob;
 
         ctx.save();
         if (item.type === 'bit') {
-          // Cyan Glowing Bit
           ctx.fillStyle = '#38bdf8';
           ctx.shadowColor = '#38bdf8';
           ctx.shadowBlur = 12;
@@ -596,28 +669,24 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
           ctx.arc(item.x + 12, cy + 12, 4, 0, Math.PI * 2);
           ctx.fill();
         } else if (item.type === 'star') {
-          // Golden Star
           ctx.font = '24px sans-serif';
           ctx.textAlign = 'center';
           ctx.shadowColor = '#facc15';
           ctx.shadowBlur = 14;
           ctx.fillText('⭐', item.x + 12, cy + 18);
         } else if (item.type === 'silicon') {
-          // Silicon Gem (from beach sand)
           ctx.font = '24px sans-serif';
           ctx.textAlign = 'center';
           ctx.shadowColor = '#34d399';
           ctx.shadowBlur = 12;
           ctx.fillText('🏖️', item.x + 12, cy + 18);
         } else if (item.type === 'usb_drive') {
-          // USB Flash Drive
           ctx.font = '24px sans-serif';
           ctx.textAlign = 'center';
           ctx.shadowColor = '#f59e0b';
           ctx.shadowBlur = 12;
           ctx.fillText('💾', item.x + 12, cy + 18);
         } else if (item.type === 'crystal') {
-          // Purple Crystal
           ctx.font = '26px sans-serif';
           ctx.textAlign = 'center';
           ctx.shadowColor = '#c084fc';
@@ -627,86 +696,142 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
         ctx.restore();
       });
 
-      // 4. Render Interactive Quiz Doors
-      doors.forEach((door) => {
+      // 3. Render Mandatory Force Field Doors (Full vertical laser wall when locked!)
+      doorsRef.current.forEach((door) => {
         if (!door.isUnlocked) {
-          // Locked Barrier
-          const glow = Math.sin(tick * 0.08) * 5 + 10;
           ctx.save();
-          ctx.fillStyle = 'rgba(239, 68, 68, 0.2)';
-          ctx.strokeStyle = '#ef4444';
+          // Full-height energy beam from y: 0 to y: level.canvasHeight
+          const beamGrad = ctx.createLinearGradient(door.x, 0, door.x + door.width, 0);
+          beamGrad.addColorStop(0, 'rgba(239, 68, 68, 0.4)');
+          beamGrad.addColorStop(0.5, 'rgba(244, 63, 94, 0.85)');
+          beamGrad.addColorStop(1, 'rgba(239, 68, 68, 0.4)');
+
+          ctx.fillStyle = beamGrad;
+          ctx.fillRect(door.x, 0, door.width, level.canvasHeight);
+
+          // Glowing laser border lines
+          ctx.strokeStyle = '#f43f5e';
           ctx.lineWidth = 4;
-          ctx.shadowColor = '#ef4444';
-          ctx.shadowBlur = glow;
+          ctx.shadowColor = '#f43f5e';
+          ctx.shadowBlur = 15;
           ctx.beginPath();
-          ctx.roundRect(door.x, door.y, door.width, door.height, 12);
+          ctx.moveTo(door.x, 0);
+          ctx.lineTo(door.x, level.canvasHeight);
+          ctx.moveTo(door.x + door.width, 0);
+          ctx.lineTo(door.x + door.width, level.canvasHeight);
+          ctx.stroke();
+
+          // Animated energy hazard grid
+          const animOffset = (tick * 3) % 40;
+          ctx.strokeStyle = 'rgba(255, 255, 255, 0.5)';
+          ctx.lineWidth = 2;
+          for (let y = animOffset; y < level.canvasHeight; y += 40) {
+            ctx.beginPath();
+            ctx.moveTo(door.x, y);
+            ctx.lineTo(door.x + door.width, y + 10);
+            ctx.stroke();
+          }
+
+          // Guardian Card in middle of the door
+          const cardY = door.y + door.height / 2 - 20;
+          ctx.fillStyle = '#0f172a';
+          ctx.strokeStyle = '#fbbf24';
+          ctx.lineWidth = 3;
+          ctx.shadowColor = '#fbbf24';
+          ctx.shadowBlur = 12;
+          ctx.beginPath();
+          ctx.roundRect(door.x - 30, cardY - 40, door.width + 60, 80, 16);
           ctx.fill();
           ctx.stroke();
 
-          // Lock Icon & Speech bubble
-          ctx.font = '30px sans-serif';
+          // Guardian Emoji & Lock
+          ctx.font = '28px sans-serif';
           ctx.textAlign = 'center';
-          ctx.fillText('🔒', door.x + door.width / 2, door.y + door.height / 2 + 10);
+          ctx.fillText(door.characterEmoji || '🔮', door.x + door.width / 2, cardY - 8);
 
-          // Guardian Emoji on top
-          if (door.characterEmoji) {
-            ctx.font = '26px sans-serif';
-            ctx.fillText(door.characterEmoji, door.x + door.width / 2, door.y - 12);
-          }
-
-          // Question badge
-          ctx.fillStyle = '#fef08a';
           ctx.font = 'bold 11px sans-serif';
-          ctx.fillText('¡TOCA AQUÍ!', door.x + door.width / 2, door.y - 36);
+          ctx.fillStyle = '#fde047';
+          ctx.fillText('¡DESAFÍO OBLIGATORIO!', door.x + door.width / 2, cardY + 16);
+          ctx.fillStyle = '#ffffff';
+          ctx.fillText('🔒 TOCA AQUÍ', door.x + door.width / 2, cardY + 30);
+
           ctx.restore();
         } else {
-          // Unlocked open portal
+          // Open green gateway
           ctx.save();
-          ctx.strokeStyle = 'rgba(52, 211, 153, 0.6)';
+          ctx.strokeStyle = 'rgba(52, 211, 153, 0.5)';
           ctx.lineWidth = 2;
-          ctx.setLineDash([6, 6]);
+          ctx.setLineDash([8, 8]);
           ctx.beginPath();
           ctx.roundRect(door.x, door.y, door.width, door.height, 12);
           ctx.stroke();
 
-          ctx.font = '26px sans-serif';
+          ctx.font = '24px sans-serif';
           ctx.textAlign = 'center';
-          ctx.fillText('✨🔓✨', door.x + door.width / 2, door.y + door.height / 2 + 10);
+          ctx.fillText('✨ ABRIÓ ✨', door.x + door.width / 2, door.y + door.height / 2);
           ctx.restore();
         }
       });
 
-      // 5. Render Goal Portal (Exit Flag / Energy Portal)
+      // 4. Render Goal Portal (Active OR Locked based on doors state)
       const goal = level.goal;
+      const allDoorsUnlocked = doorsRef.current.every((d) => d.isUnlocked);
+
       ctx.save();
       const goalAngle = tick * 0.04;
       ctx.translate(goal.x + goal.width / 2, goal.y + goal.height / 2);
 
-      // Rotating glow rings
-      ctx.strokeStyle = '#38bdf8';
-      ctx.lineWidth = 4;
-      ctx.shadowColor = '#38bdf8';
-      ctx.shadowBlur = 18;
-      ctx.beginPath();
-      ctx.ellipse(0, 0, goal.width / 2, goal.height / 2, goalAngle, 0, Math.PI * 2);
-      ctx.stroke();
+      if (allDoorsUnlocked) {
+        // ACTIVE GOAL
+        ctx.strokeStyle = '#38bdf8';
+        ctx.lineWidth = 5;
+        ctx.shadowColor = '#38bdf8';
+        ctx.shadowBlur = 20;
+        ctx.beginPath();
+        ctx.ellipse(0, 0, goal.width / 2, goal.height / 2, goalAngle, 0, Math.PI * 2);
+        ctx.stroke();
 
-      ctx.strokeStyle = '#fde047';
-      ctx.beginPath();
-      ctx.ellipse(0, 0, goal.width / 3, goal.height / 3, -goalAngle * 1.5, 0, Math.PI * 2);
-      ctx.stroke();
+        ctx.strokeStyle = '#fde047';
+        ctx.beginPath();
+        ctx.ellipse(0, 0, goal.width / 3, goal.height / 3, -goalAngle * 1.5, 0, Math.PI * 2);
+        ctx.stroke();
 
-      ctx.font = '36px sans-serif';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText('🌟', 0, 0);
+        ctx.font = '36px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('🌟', 0, 0);
 
-      ctx.fillStyle = '#fde047';
-      ctx.font = 'black 13px sans-serif';
-      ctx.fillText('¡META!', 0, -goal.height / 2 - 14);
+        ctx.fillStyle = '#fde047';
+        ctx.font = 'bold 14px sans-serif';
+        ctx.fillText('¡META ABIERTA!', 0, -goal.height / 2 - 14);
+      } else {
+        // LOCKED GOAL (Requires passing all questions!)
+        ctx.strokeStyle = '#ef4444';
+        ctx.lineWidth = 4;
+        ctx.shadowColor = '#ef4444';
+        ctx.shadowBlur = 10;
+        ctx.beginPath();
+        ctx.ellipse(0, 0, goal.width / 2, goal.height / 2, 0, 0, Math.PI * 2);
+        ctx.stroke();
+
+        ctx.fillStyle = 'rgba(239, 68, 68, 0.2)';
+        ctx.fill();
+
+        ctx.font = '32px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('🔒', 0, 0);
+
+        ctx.fillStyle = '#fca5a5';
+        ctx.font = 'bold 12px sans-serif';
+        ctx.fillText('PORTAL BLOQUEADO', 0, -goal.height / 2 - 14);
+        ctx.font = 'bold 10px sans-serif';
+        ctx.fillStyle = '#fecaca';
+        ctx.fillText('¡Responde las preguntas!', 0, -goal.height / 2 - 2);
+      }
       ctx.restore();
 
-      // 6. Render Particles
+      // 5. Render Particles
       for (let i = particlesRef.current.length - 1; i >= 0; i--) {
         const p = particlesRef.current[i];
         p.x += p.vx;
@@ -727,20 +852,17 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
         }
       }
 
-      // 7. Render Player Avatar
+      // 6. Render Player
       const player = playerRef.current;
       ctx.save();
       ctx.translate(player.x + player.width / 2, player.y + player.height / 2);
 
-      // Facing orientation
       if (player.facing === 'left') {
         ctx.scale(-1, 1);
       }
 
-      // Player body bobbing
       const walkBob = player.isGrounded && Math.abs(player.vx) > 0.5 ? Math.sin(tick * 0.3) * 3 : 0;
 
-      // Character body
       let bodyColor = '#3b82f6';
       let charEmoji = '🤖';
       if (characterId === 'pixel') {
@@ -754,13 +876,16 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
         charEmoji = '🧑‍🚀';
       }
 
-      // Shadow on ground
+      // Victory float up
+      if (isCompletedRef.current) {
+        ctx.translate(0, -Math.min(30, victoryCelebrationTickRef.current * 2));
+      }
+
       ctx.fillStyle = 'rgba(0, 0, 0, 0.3)';
       ctx.beginPath();
       ctx.ellipse(0, player.height / 2 - 2, player.width / 2, 6, 0, 0, Math.PI * 2);
       ctx.fill();
 
-      // Body bubble
       ctx.fillStyle = bodyColor;
       ctx.strokeStyle = '#ffffff';
       ctx.lineWidth = 2.5;
@@ -775,13 +900,11 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
       ctx.fill();
       ctx.stroke();
 
-      // Main Face Emoji
       ctx.font = '24px sans-serif';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.fillText(charEmoji, 0, -2 + walkBob);
 
-      // Accessory Hat if equipped
       if (characterHat && characterHat !== 'ninguno') {
         let hatEmoji = '✨';
         if (characterHat === 'chef') hatEmoji = '👨‍🍳';
@@ -798,7 +921,6 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
 
       ctx.restore(); // End World Translation
 
-      // Continue animation loop
       animFrameIdRef.current = requestAnimationFrame(loop);
     };
 
@@ -809,7 +931,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
         cancelAnimationFrame(animFrameIdRef.current);
       }
     };
-  }, [collectibles, doors, activeDoor, characterId, characterHat, level, spawnCollectParticles, bitsCollected, score, onLevelComplete]);
+  }, [level.id, characterId, characterHat, spawnParticles, onLevelComplete, activeDoor, level]);
 
   // Touch handlers
   const handleLeftStart = () => {
@@ -830,6 +952,8 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
   const handleJumpEnd = () => {
     inputRef.current.jump = false;
   };
+
+  const totalDoors = level.doors.length;
 
   return (
     <div className="relative w-full h-full flex flex-col bg-slate-950 overflow-hidden select-none">
@@ -853,14 +977,35 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
         </div>
 
         {/* Stats HUD */}
-        <div className="flex items-center gap-3 md:gap-6">
+        <div className="flex items-center gap-2 md:gap-4">
+          {/* Questions/Doors Mandatory Status */}
+          <div className={`flex items-center gap-1.5 px-3 py-1 rounded-xl border ${
+            unlockedCount >= totalDoors
+              ? 'bg-emerald-950/80 border-emerald-400/60 text-emerald-200'
+              : 'bg-rose-950/80 border-rose-500/60 text-rose-200'
+          }`}>
+            {unlockedCount >= totalDoors ? (
+              <CheckCircle2 className="w-4 h-4 text-emerald-300" />
+            ) : (
+              <Lock className="w-4 h-4 text-rose-300" />
+            )}
+            <div className="text-left">
+              <span className="text-[9px] uppercase block font-bold leading-none">
+                {unlockedCount >= totalDoors ? 'Meta Lista' : 'Preguntas'}
+              </span>
+              <span className="text-xs md:text-sm font-black">
+                {unlockedCount} / {totalDoors}
+              </span>
+            </div>
+          </div>
+
           {/* Bits collected */}
           <div className="flex items-center gap-1.5 px-3 py-1 bg-cyan-950/80 rounded-xl border border-cyan-500/40">
             <span className="text-base md:text-lg">💎</span>
             <div className="text-left">
               <span className="text-[9px] text-cyan-300 uppercase block font-bold leading-none">Bits</span>
               <span className="text-xs md:text-sm font-black text-cyan-200">
-                {bitsCollected} / {level.collectibles.length}
+                {hudBits} / {level.collectibles.length}
               </span>
             </div>
           </div>
@@ -870,11 +1015,11 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
             <span className="text-base md:text-lg">⭐</span>
             <div className="text-left">
               <span className="text-[9px] text-amber-300 uppercase block font-bold leading-none">Puntos</span>
-              <span className="text-xs md:text-sm font-black text-amber-200">{score}</span>
+              <span className="text-xs md:text-sm font-black text-amber-200">{hudScore}</span>
             </div>
           </div>
 
-          {/* Quick Voice Tip Button */}
+          {/* Voice Tip */}
           <button
             onClick={() => soundService.speak(level.guideCharacter.tip, true)}
             className="p-2 bg-indigo-600/80 hover:bg-indigo-500 text-white rounded-xl transition-all shadow-md active:scale-95 flex items-center gap-1 text-xs font-bold"
@@ -895,7 +1040,15 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
           className="w-full h-full object-contain cursor-crosshair shadow-2xl"
         />
 
-        {/* Floating Quick Hint badge on bottom of canvas */}
+        {/* Goal Warning Pop-up Banner if player touches locked goal */}
+        {goalWarning && (
+          <div className="absolute top-4 left-1/2 -translate-x-1/2 z-30 max-w-md w-[92%] p-3.5 bg-rose-600/95 text-white font-black text-xs md:text-sm rounded-2xl border-2 border-rose-300 shadow-2xl flex items-center gap-3 animate-bounce-once">
+            <AlertCircle className="w-6 h-6 text-yellow-300 shrink-0" />
+            <span>{goalWarning}</span>
+          </div>
+        )}
+
+        {/* Floating Quick Hint badge */}
         <div className="absolute bottom-3 left-4 hidden sm:flex items-center gap-2 px-3 py-1.5 bg-slate-900/85 backdrop-blur-md rounded-xl border border-slate-700/80 text-xs text-slate-300 shadow-lg">
           <Sparkles className="w-4 h-4 text-amber-400" />
           <span>
@@ -904,7 +1057,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
         </div>
       </div>
 
-      {/* Mobile/Tablet Touch Controls bar */}
+      {/* Mobile/Tablet Touch Controls */}
       <TouchControls
         onLeftStart={handleLeftStart}
         onLeftEnd={handleLeftEnd}
@@ -915,7 +1068,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
         onAction={() => soundService.speak(level.guideCharacter.tip, true)}
       />
 
-      {/* Quiz Modal when reaching an interactive door */}
+      {/* Quiz Modal when interacting with mandatory door */}
       {activeDoor && (
         <QuizPortalModal
           door={activeDoor}

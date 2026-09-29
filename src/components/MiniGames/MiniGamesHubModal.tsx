@@ -1,9 +1,11 @@
 import React from 'react';
-import { Gamepad2, X, Sparkles, ChefHat, HardDrive, Cloud, Palette, RefreshCw } from 'lucide-react';
+import { Gamepad2, X } from 'lucide-react';
 import { soundService } from '../../services/audio';
 
+export type MiniGameType = 'kitchen' | 'storage' | 'cloud' | 'dino' | 'cycle' | 'math' | 'devices';
+
 interface MiniGamesHubModalProps {
-  onSelectGame: (gameType: 'kitchen' | 'storage' | 'cloud' | 'dino' | 'cycle') => void;
+  onSelectGame: (gameType: MiniGameType) => void;
   onClose: () => void;
 }
 
@@ -25,6 +27,24 @@ const MINI_GAMES = [
     desc: 'Clasifica fotos, tareas del colegio y videos de YouTube en el baúl grande, la mochila de viaje o la nube.',
     color: 'from-cyan-500/20 to-blue-600/20 border-cyan-400',
     reward: '+150 Puntos ⭐',
+  },
+  {
+    id: 'math' as const,
+    title: 'El Rayo de Sumas de la CPU',
+    subtitle: '¡Velocidad de microsegundos!',
+    emoji: '⚡',
+    desc: 'Resuelve sumas veloces de 2do grado para comprobar lo rápido que piensa el cerebro de silicio.',
+    color: 'from-yellow-500/20 to-amber-600/20 border-yellow-400',
+    reward: '+100 Puntos ⭐',
+  },
+  {
+    id: 'devices' as const,
+    title: '¿Entrada o Salida?',
+    subtitle: 'Clasificador de Periféricos',
+    emoji: '🎯',
+    desc: 'Identifica si el teclado, la pantalla, el ratón, la impresora y los altavoces son de Entrada o de Salida.',
+    color: 'from-teal-500/20 to-cyan-600/20 border-teal-400',
+    reward: '+120 Puntos ⭐',
   },
   {
     id: 'dino' as const,
